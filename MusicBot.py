@@ -1,4 +1,3 @@
-import queue
 from types import NoneType
 import discord
 from discord.ext import commands
@@ -6,10 +5,12 @@ from discord import FFmpegPCMAudio, PCMVolumeTransformer
 
 import asyncio
 
-import youtube_dl
-
 import pafy
 FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5','options': '-vn'}
+
+import validators
+
+from urllib.request import urlopen
 
 from dotenv import load_dotenv
 
@@ -23,8 +24,11 @@ bot = commands.Bot(command_prefix='.')
 
 queueOfSongs = []
 curPlaying = False
-voice = 0 
+voice = 0
 wasPlaying = False
+skipped = False
+looping = False
+paused = False
 
 @bot.command()
 async def join(ctx):
@@ -47,12 +51,13 @@ async def join(ctx):
             
 
 @bot.command()
-async def play(ctx, link):
+async def play(ctx, *link):
     # the voice client =/= channel TY
     destination = ctx.author.voice
     bot_channel = ctx.guild.voice_client
     global voice
 
+    searchUrl = ''
     # if user isn't in a channel
     if(destination == None):
         await ctx.reply('I can\'t join a channel you\'re not in buddy')
@@ -64,8 +69,36 @@ async def play(ctx, link):
 
     # NEED TO clean link
     global queueOfSongs
-    queueOfSongs.append(link)
-    print('added to queue')
+    validLink = False
+    if (len(link) == 1):
+        try:
+            # what to do if it is a youtube link
+            validators.url(link[0])
+            if not ('youtu' in link[0].lower()):
+                await ctx.reply('Sorry, only youtube links work')
+                return
+            validLink = True
+            queueOfSongs.append(link[0])
+        except:
+            # validators throws an execption so this is just to catch it incase
+            a = 1 + 1
+    
+    if (not validLink):
+        # assuming to be non link, but rather a youtube search
+        search = 'https://www.youtube.com/results?search_query=' + '+'.join(link)
+        page = urlopen(search)
+        html_bytes = page.read()
+        html = html_bytes.decode("utf-8")
+
+        place = html.find('videoId')
+        html = html[place+10:]
+        searchUrl = 'https://www.youtube.com/watch?v=' + html[0:html.find("\"")]
+        queueOfSongs.append(searchUrl)
+
+    if len(queueOfSongs) == 1:
+        await ctx.reply('Now Playing ' + searchUrl)
+    else:
+        await ctx.reply('Added to the queue')
 
     global curPlaying
     if (not curPlaying):
@@ -76,36 +109,52 @@ async def startPlaying(ctx):
     global queueOfSongs
     global curPlaying
     global voice
+    global wasPlaying
+    global paused
 
     curPlaying = True
-    while (len(queueOfSongs) != 0):
-        link = queueOfSongs[0]
-        queueOfSongs = queueOfSongs[1:len(queueOfSongs)]
+    if (not wasPlaying):
+        await initPlayLoop(ctx)
+    else:
+        paused = False
+        await initPlayLoop(ctx)
+    
+    curPlaying = False
 
-        # Youtube Dl Solution - Slow, awkward
-        #video_info = youtube_dl.YoutubeDL().extract_info(url = link,download=False )
-        #filename = f"song.mp3"
-        #options={
-        #    'format':'bestaudio/best',
-        #    'keepvideo':False,
-        #    'outtmpl':filename,
-        #}
+async def initPlayLoop(ctx):
+    global queueOfSongs
+    global wasPlaying
+    global voice
+    global skipped
+    global curPlaying
+    global paused
+    while (len(queueOfSongs) != 0 or wasPlaying) and not paused:
+        if wasPlaying:
+            voice.resume()
+            wasPlaying = False
+        else:
+            link = queueOfSongs[0]
 
-        #with youtube_dl.YoutubeDL(options) as ydl:
-        #    ydl.download([video_info['webpage_url']])
+            video = pafy.new(link).getbestaudio()
 
-        #await asyncio.sleep(10)
-        video = pafy.new(link).getbestaudio()
-
-        source = FFmpegPCMAudio(video.url, **FFMPEG_OPTIONS)
-        voice.play(source)
+            # not my solution, got from internet: https://stackoverflow.com/questions/66115216/discord-py-play-audio-from-url
+            source = FFmpegPCMAudio(video.url, **FFMPEG_OPTIONS)
+            voice.play(source)
+        
         while(voice.is_playing()):
             await asyncio.sleep(.1)
-        
-        print('done')
-        
+            
+        if not looping:
+            queueOfSongs = queueOfSongs[1:len(queueOfSongs)]
 
-    curPlaying = False
+@bot.command()
+async def loop(ctx):
+    global looping
+    looping = not looping
+    if (looping):
+        await ctx.reply('Now Looping')
+    else:
+        await ctx.reply('No Longer Looping')
 
 @bot.command()
 async def quack(ctx):
@@ -121,8 +170,7 @@ async def quack(ctx):
         voice.play(source)
         while(voice.is_playing()):
             await asyncio.sleep(.1)
-        print('done')
-        currPlaying = False
+        curPlaying = False
 
 
 @bot.command()
@@ -141,8 +189,37 @@ async def exit(ctx):
 
 @bot.command()
 async def pause(ctx):
-    
-        
-    
+    global curPlaying
+    global wasPlaying
+    global voice
+    global paused
+    if (curPlaying):
+        curPlaying = False
+        wasPlaying = True
+        paused = True
+        voice.pause()
+
+@bot.command()
+async def skip(ctx):
+    await ctx.reply('Skipping...')
+    # ends while statement in playLoop
+    voice.pause()
+
+@bot.command()
+async def queue(ctx):
+    global queueOfSongs
+    if (len(queueOfSongs) == 0):
+        ctx.reply('No Songs in Queue')
+    else:
+        msg = 'Now Playing: ' + pafy.new(queueOfSongs[0]).title
+        for i in range(1,5):
+            if (i >= len(queueOfSongs)):
+                break
+            else:
+                msg = msg + '\n' + str(i) + ': ' + pafy.new(queueOfSongs[i]).title
+        if (len(queueOfSongs) > 5):
+            msg = msg + '\nAnd ' + str(len(queueOfSongs) - 5) + ' more'
+        await ctx.reply(msg)
+
 
 bot.run(getenv('TOKEN'))
